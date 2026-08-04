@@ -1,0 +1,1187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AquaWatch — Water Quality Monitor</title>
+
+  <!-- ─── Fonts ─────────────────────────────────────────────────────────── -->
+  <!-- Orbitron: industrial/sci-fi display font for big values & headings   -->
+  <!-- Share Tech Mono: monospaced data readout feel for labels & sub-text  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+
+  <!-- ─── Chart.js ──────────────────────────────────────────────────────── -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+
+  <!-- ─── Firebase SDK (v9 compat bundle) ──────────────────────────────── -->
+  <!-- Using compat build so window.firebase is available globally          -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+
+  <style>
+    /* ═══════════════════════════════════════════════════════════════════════
+       DESIGN TOKENS
+       Industrial-dark palette: deep navy bg, electric cyan accents,
+       semantic green/amber/red for water quality status states.
+       ═══════════════════════════════════════════════════════════════════════ */
+    :root {
+      --bg-base:      #060d14;   /* page background           */
+      --bg-card:      #0b1825;   /* card surfaces             */
+      --bg-card-alt:  #0f2030;   /* slightly lighter card     */
+      --border:       #1a3448;   /* subtle borders            */
+      --border-glow:  #1e4d6b;   /* hovered / highlighted     */
+
+      --cyan:         #00c8f0;   /* primary accent            */
+      --cyan-dim:     #0a4a5e;   /* dimmed cyan background    */
+
+      --safe:         #00e676;   /* SAFE  — green             */
+      --safe-dim:     #003d20;
+      --caution:      #ffab00;   /* CAUTION — amber           */
+      --caution-dim:  #3d2800;
+      --danger:       #ff1744;   /* DANGER  — red             */
+      --danger-dim:   #3d0010;
+
+      --text-primary:   #d6eeff;
+      --text-secondary: #5a8aaa;
+      --text-muted:     #2e5570;
+
+      --font-display: 'Orbitron', sans-serif;
+      --font-mono:    'Share Tech Mono', monospace;
+
+      /* Power estimation constants */
+      --voltage: 5;              /* V  */
+    }
+
+    /* ─── Reset & base ───────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg-base);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      overflow-x: hidden;
+    }
+
+    /* Subtle scanline texture — cheap but effective industrial feel */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        rgba(0, 0, 0, 0.08) 3px,
+        rgba(0, 0, 0, 0.08) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* ─── Page shell ─────────────────────────────────────────────────────── */
+    .dashboard {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 100vh;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px 24px 24px;
+      gap: 20px;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       HEADER
+       ═══════════════════════════════════════════════════════════════════════ */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    /* Hexagonal logo shape built in pure CSS */
+    .logo {
+      width: 44px;
+      height: 44px;
+      background: var(--cyan-dim);
+      border: 1.5px solid var(--cyan);
+      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-display);
+      font-size: 16px;
+      font-weight: 900;
+      color: var(--cyan);
+    }
+
+    .brand-text h1 {
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      color: var(--text-primary);
+    }
+
+    .brand-text p {
+      font-size: 11px;
+      color: var(--text-secondary);
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+
+    /* Live clock & connection badge */
+    .header-meta {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .clock {
+      font-family: var(--font-display);
+      font-size: 15px;
+      color: var(--text-secondary);
+      letter-spacing: 0.1em;
+    }
+
+    /* Pulsing dot + text badge */
+    .conn-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      transition: border-color 0.3s, color 0.3s;
+    }
+
+    .conn-badge.connected { border-color: var(--safe); color: var(--safe); }
+    .conn-badge.error     { border-color: var(--danger); color: var(--danger); }
+
+    .conn-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .conn-badge.connected .conn-dot { animation: pulse-dot 1.6s infinite; }
+
+    @keyframes pulse-dot {
+      0%,100% { opacity: 1; transform: scale(1);   }
+      50%      { opacity: 0.4; transform: scale(0.6); }
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       MAIN GRID
+       Three rows:
+         Row 1 — Status bar (full width)
+         Row 2 — Graph (large, full width)
+         Row 3 — TDS value card + Power card
+       ═══════════════════════════════════════════════════════════════════════ */
+    .main-grid {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 20px;
+    }
+
+    /* ─── Card base ───────────────────────────────────────────────────────── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 20px 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Thin top-edge accent line on every card */
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+      opacity: 0.4;
+    }
+
+    .card-label {
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    /* ─── STATUS BAR ─────────────────────────────────────────────────────── */
+    .status-bar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 16px 28px;
+      gap: 20px;
+    }
+
+    .status-bar::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+      opacity: 0.4;
+    }
+
+    /* The big centered status text */
+    .status-center {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-label-small {
+      font-size: 10px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .status-text {
+      font-family: var(--font-display);
+      font-size: 36px;
+      font-weight: 900;
+      letter-spacing: 0.15em;
+      transition: color 0.4s;
+    }
+
+    /* Left metadata */
+    .status-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .meta-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      font-size: 12px;
+    }
+
+    .meta-item span:first-child { color: var(--text-muted); letter-spacing: 0.1em; }
+    .meta-item span:last-child  { color: var(--text-primary); font-weight: 600; }
+
+    /* Threshold progress bar row */
+    .threshold-bar-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+    }
+
+    .threshold-label {
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    /* Three-segment threshold indicator */
+    .threshold-track {
+      display: flex;
+      width: 220px;
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      gap: 2px;
+    }
+
+    .threshold-track .seg {
+      flex: 1;
+      border-radius: 2px;
+    }
+
+    .seg-safe    { background: var(--safe);    opacity: 0.35; }
+    .seg-caution { background: var(--caution); opacity: 0.35; }
+    .seg-danger  { background: var(--danger);  opacity: 0.35; }
+
+    /* Needle / pointer on the threshold track */
+    .threshold-needle-row {
+      position: relative;
+      width: 220px;
+      height: 10px;
+    }
+
+    .threshold-needle {
+      position: absolute;
+      top: 0;
+      width: 3px;
+      height: 10px;
+      background: var(--text-primary);
+      border-radius: 2px;
+      transform: translateX(-50%);
+      transition: left 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+      box-shadow: 0 0 6px var(--text-primary);
+    }
+
+    .threshold-range-labels {
+      display: flex;
+      justify-content: space-between;
+      width: 220px;
+      font-size: 9px;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+    }
+
+    /* ─── GRAPH PANEL ────────────────────────────────────────────────────── */
+    .graph-panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .graph-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .graph-header h2 {
+      font-family: var(--font-display);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+
+    /* Rolling-window stats displayed in the graph header */
+    .graph-stats {
+      display: flex;
+      gap: 24px;
+    }
+
+    .graph-stat {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+    }
+
+    .graph-stat span:first-child {
+      font-size: 9px;
+      letter-spacing: 0.15em;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    .graph-stat span:last-child {
+      font-size: 15px;
+      font-family: var(--font-display);
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .chart-wrapper {
+      position: relative;
+      flex: 1;
+      min-height: 260px;
+    }
+
+    /* ─── BOTTOM ROW ─────────────────────────────────────────────────────── */
+    .bottom-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    /* TDS big-number card */
+    .tds-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 28px 24px;
+      text-align: center;
+    }
+
+    .tds-value {
+      font-family: var(--font-display);
+      font-size: 72px;
+      font-weight: 900;
+      letter-spacing: -0.02em;
+      line-height: 1;
+      color: var(--cyan);
+      transition: color 0.4s;
+      /* subtle glow, updated via JS when status changes */
+      text-shadow: 0 0 40px rgba(0, 200, 240, 0.3);
+    }
+
+    .tds-unit {
+      font-size: 18px;
+      font-family: var(--font-display);
+      font-weight: 400;
+      letter-spacing: 0.2em;
+      color: var(--text-secondary);
+      margin-top: 6px;
+    }
+
+    .tds-updated {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.15em;
+      margin-top: 14px;
+    }
+
+    /* Power consumption card */
+    .power-card {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 20px 24px;
+    }
+
+    .power-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 10px;
+    }
+
+    .power-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+    }
+
+    .power-row:last-child { border-bottom: none; padding-bottom: 0; }
+
+    .power-row-label {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .power-row-label span:first-child {
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .power-row-label span:last-child {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .power-row-value {
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    /* Highlighted total power block */
+    .power-total {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-card-alt);
+      border: 1px solid var(--border-glow);
+      border-radius: 5px;
+      padding: 14px 18px;
+      margin-top: 14px;
+    }
+
+    .power-total-label {
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+
+    .power-total-value {
+      font-family: var(--font-display);
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--cyan);
+    }
+
+    /* Component breakdown mini bars */
+    .power-breakdown {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .pb-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 10px;
+    }
+
+    .pb-name  { color: var(--text-muted); width: 90px; letter-spacing: 0.08em; }
+    .pb-track { flex: 1; height: 4px; background: var(--bg-card-alt); border-radius: 2px; overflow: hidden; }
+    .pb-fill  { height: 100%; border-radius: 2px; transition: width 0.5s; }
+    .pb-val   { color: var(--text-secondary); width: 40px; text-align: right; }
+
+    /* ─── Footer ──────────────────────────────────────────────────────────── */
+    .footer {
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.12em;
+    }
+
+    /* ─── Error overlay ───────────────────────────────────────────────────── */
+    #error-toast {
+      position: fixed;
+      bottom: 20px; right: 20px;
+      background: var(--danger-dim);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+      padding: 10px 18px;
+      border-radius: 5px;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      display: none;
+      z-index: 1000;
+    }
+
+    /* ─── Number update flash animation ──────────────────────────────────── */
+    @keyframes value-flash {
+      0%   { opacity: 1; }
+      30%  { opacity: 0.3; }
+      100% { opacity: 1; }
+    }
+
+    /* 🔥 MOBILE RESPONSIVENESS FIX */
+@media (max-width: 768px) {
+
+  .dashboard {
+    padding: 10px;
+  }
+
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .header-meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .status-bar {
+    grid-template-columns: 1fr;
+    text-align: center;
+    gap: 15px;
+  }
+
+  .status-meta {
+    align-items: center;
+  }
+
+  .threshold-bar-wrap {
+    align-items: center;
+  }
+
+  .bottom-row {
+    grid-template-columns: 1fr;
+  }
+
+  .tds-value {
+    font-size: 48px;
+  }
+
+  .status-text {
+    font-size: 26px;
+  }
+
+  .chart-wrapper {
+    min-height: 200px;
+  }
+}
+
+    .flash { animation: value-flash 0.35s ease-out; }
+  </style>
+</head>
+
+<body>
+<div class="dashboard">
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       HEADER
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="logo">AW</div>
+      <div class="brand-text">
+        <h1>AQUAWATCH</h1>
+        <p>Real-Time Water Quality Monitoring System · ESP32 + Firebase</p>
+      </div>
+    </div>
+    <div class="header-meta">
+      <div class="clock" id="clock">--:--:--</div>
+      <div class="conn-badge" id="conn-badge">
+        <div class="conn-dot"></div>
+        <span id="conn-text">CONNECTING</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       MAIN CONTENT
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <main class="main-grid">
+
+    <!-- STATUS BAR -->
+    <div class="status-bar card">
+      <!-- Left: session metadata -->
+      <div class="status-meta">
+        <div class="meta-item">
+          <span>Session started</span>
+          <span id="session-start">--:--:--</span>
+        </div>
+        <div class="meta-item">
+          <span>Samples captured</span>
+          <span id="sample-count">0</span>
+        </div>
+        <div class="meta-item">
+          <span>Avg TDS (session)</span>
+          <span id="session-avg">— ppm</span>
+        </div>
+        <div class="meta-item">
+          <span>Last updated</span>
+          <span id="last-updated">—</span>
+        </div>
+      </div>
+
+      <!-- Centre: big status word -->
+      <div class="status-center">
+        <div class="status-label-small">Water Quality</div>
+        <div class="status-text" id="status-text">—</div>
+      </div>
+
+      <!-- Right: threshold needle indicator -->
+      <div class="threshold-bar-wrap">
+        <div class="threshold-label">TDS Threshold Map</div>
+        <div class="threshold-track">
+          <div class="seg seg-safe"></div>
+          <div class="seg seg-caution"></div>
+          <div class="seg seg-danger"></div>
+        </div>
+        <div class="threshold-needle-row">
+          <div class="threshold-needle" id="threshold-needle" style="left: 0%"></div>
+        </div>
+        <div class="threshold-range-labels">
+          <span>0</span><span>300</span><span>600</span><span>1000</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- GRAPH PANEL -->
+    <div class="card graph-panel">
+      <div class="graph-header">
+        <h2>TDS — Rolling History (last 25 readings)</h2>
+        <div class="graph-stats">
+          <div class="graph-stat">
+            <span>Min</span><span id="stat-min">—</span>
+          </div>
+          <div class="graph-stat">
+            <span>Max</span><span id="stat-max">—</span>
+          </div>
+          <div class="graph-stat">
+            <span>Avg</span><span id="stat-avg">—</span>
+          </div>
+        </div>
+      </div>
+      <div class="chart-wrapper">
+        <canvas id="tdsChart"
+          role="img"
+          aria-label="Line chart showing the last 25 TDS readings from the water quality sensor in real time.">
+          Live TDS readings displayed as a real-time line graph.
+        </canvas>
+      </div>
+    </div>
+
+    <!-- BOTTOM ROW -->
+    <div class="bottom-row">
+
+      <!-- TDS LIVE VALUE -->
+      <div class="card tds-card">
+        <div class="card-label">Current TDS Reading</div>
+        <div class="tds-value" id="tds-value">—</div>
+        <div class="tds-unit">PPM &nbsp;(mg/L)</div>
+        <div class="tds-updated" id="tds-updated">Waiting for data…</div>
+      </div>
+
+      <!-- POWER CONSUMPTION -->
+      <div class="card power-card">
+        <div class="card-label">Estimated Power Consumption</div>
+
+        <div class="power-rows">
+          <!-- Voltage row -->
+          <div class="power-row">
+            <div class="power-row-label">
+              <span>Supply Voltage</span>
+              <span>USB / 5V rail</span>
+            </div>
+            <div class="power-row-value">5.0 V</div>
+          </div>
+          <!-- Current row -->
+          <div class="power-row">
+            <div class="power-row-label">
+              <span>Est. Current Draw</span>
+              <span>All components combined</span>
+            </div>
+            <div class="power-row-value" id="power-current">145 mA</div>
+          </div>
+        </div>
+
+        <!-- Component breakdown mini bars -->
+        <div class="power-breakdown">
+          <div class="pb-row">
+            <span class="pb-name">ESP32</span>
+            <div class="pb-track"><div class="pb-fill" id="pb-esp32" style="width:55%; background: var(--cyan);"></div></div>
+            <span class="pb-val">80 mA</span>
+          </div>
+          <div class="pb-row">
+            <span class="pb-name">OLED / LCD</span>
+            <div class="pb-track"><div class="pb-fill" id="pb-oled" style="width:22%; background: var(--caution);"></div></div>
+            <span class="pb-val">25 mA</span>
+          </div>
+          <div class="pb-row">
+            <span class="pb-name">TDS Sensor</span>
+            <div class="pb-track"><div class="pb-fill" id="pb-tds" style="width:14%; background: var(--safe);"></div></div>
+            <span class="pb-val">20 mA</span>
+          </div>
+          <div class="pb-row">
+            <span class="pb-name">Misc / WiFi</span>
+            <div class="pb-track"><div class="pb-fill" id="pb-misc" style="width:14%; background: var(--text-muted);"></div></div>
+            <span class="pb-val">20 mA</span>
+          </div>
+        </div>
+
+        <!-- Total power highlight -->
+        <div class="power-total">
+          <span class="power-total-label">Total Power Usage</span>
+          <span class="power-total-value" id="power-watts">0.73 W</span>
+        </div>
+      </div>
+
+    </div><!-- /bottom-row -->
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <span>ESP32 · Firebase RTDB · Chart.js 4.4</span>
+    <span id="footer-ts">—</span>
+  </footer>
+
+</div><!-- /dashboard -->
+
+<!-- Error toast -->
+<div id="error-toast">⚠ Firebase connection error — retrying…</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  CONFIGURATION  — edit these to match your project
+   ───────────────────────────────────────────────────────────────────────── */
+const FIREBASE_CONFIG = {
+  apiKey: "PASTE_YOURS",
+  authDomain: "water-quality-advisor.firebaseapp.com",
+  databaseURL: "https://water-quality-advisor-default-rtdb.asia-southeast1.firebasedatabase.app/",
+  projectId: "water-quality-advisor",
+  storageBucket: "water-quality-advisor.appspot.com",
+  messagingSenderId: "PASTE",
+  appId: "PASTE"
+};
+
+/* Path inside RTDB where TDS value is stored, e.g. "/sensor/tds"        */
+const TDS_PATH = "/tds";
+
+/* Polling settings                                                        */
+const ROLLING_WINDOW = 25;    /* number of graph data points to keep      */
+const POLL_INTERVAL_MS = 800; /* realtime listener fires on change; this
+                                  is used for the demo/simulation fallback */
+
+/* TDS threshold boundaries (ppm)                                          */
+const THRESHOLD_SAFE    = 300;  /* below → SAFE                           */
+const THRESHOLD_CAUTION = 600;  /* below → CAUTION, else DANGER           */
+const THRESHOLD_MAX     = 1000; /* used for needle position (100% = this) */
+
+/* Power estimation (mA)                                                   */
+const CURRENT_ESP32 = 80;
+const CURRENT_OLED  = 25;
+const CURRENT_TDS   = 20;
+const CURRENT_MISC  = 20;
+const TOTAL_CURRENT = CURRENT_ESP32 + CURRENT_OLED + CURRENT_TDS + CURRENT_MISC; // 145 mA
+const VOLTAGE       = 5.0;
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  STATE
+   ───────────────────────────────────────────────────────────────────────── */
+let tdsHistory     = [];
+let sessionSamples = [];
+let sessionStart   = null;
+let chart          = null;
+let useDemoMode    = false;   /* if Firebase init fails, fall back to demo */
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  CLOCK
+   ───────────────────────────────────────────────────────────────────────── */
+function fmtTime(d) {
+  return d.toLocaleTimeString('en-GB', { hour12: false });
+}
+
+setInterval(() => {
+  document.getElementById('clock').textContent = fmtTime(new Date());
+}, 1000);
+
+document.getElementById('clock').textContent = fmtTime(new Date());
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  CHART SETUP
+   ───────────────────────────────────────────────────────────────────────── */
+function buildChart() {
+  const ctx = document.getElementById('tdsChart').getContext('2d');
+
+  /* Gradient fill under the line — blends from cyan to transparent       */
+  const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+  gradient.addColorStop(0, 'rgba(0, 200, 240, 0.22)');
+  gradient.addColorStop(1, 'rgba(0, 200, 240, 0.00)');
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'TDS (ppm)',
+        data: [],
+        borderColor: '#00c8f0',
+        borderWidth: 2,
+        pointBackgroundColor: '#00c8f0',
+        pointRadius: 3,
+        pointHoverRadius: 6,
+        backgroundColor: gradient,
+        fill: true,
+        tension: 0.38         /* smooth bezier curves */
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: {
+        duration: 400,
+        easing: 'easeInOutQuart'
+      },
+      interaction: {
+        mode: 'index',
+        intersect: false
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#0b1825',
+          borderColor: '#1a3448',
+          borderWidth: 1,
+          titleColor: '#5a8aaa',
+          bodyColor: '#d6eeff',
+          titleFont: { family: "'Share Tech Mono', monospace", size: 11 },
+          bodyFont:  { family: "'Orbitron', sans-serif", size: 15 },
+          padding: 12,
+          callbacks: {
+            label: ctx => `${ctx.parsed.y.toFixed(0)} ppm`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: {
+            color: 'rgba(26, 52, 72, 0.5)',
+            drawBorder: false
+          },
+          ticks: {
+            color: '#2e5570',
+            font: { family: "'Share Tech Mono', monospace", size: 10 },
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: 8
+          }
+        },
+        y: {
+          min: 0,
+          suggestedMax: 800,
+          grid: {
+            color: 'rgba(26, 52, 72, 0.5)',
+            drawBorder: false
+          },
+          ticks: {
+            color: '#2e5570',
+            font: { family: "'Share Tech Mono', monospace", size: 10 },
+            callback: v => v + ' ppm'
+          },
+          /* Safe / Caution zone annotation drawn manually via annotation plugin
+             would need extra plugin; instead we add threshold lines below     */
+        }
+      }
+    },
+    plugins: [{
+      /* Custom plugin: draw threshold lines (SAFE / CAUTION boundaries)   */
+      id: 'thresholdLines',
+      afterDraw(chart) {
+        const { ctx, chartArea: { left, right }, scales: { y } } = chart;
+
+        const drawLine = (yVal, color, label) => {
+          const yPx = y.getPixelForValue(yVal);
+          ctx.save();
+          ctx.beginPath();
+          ctx.setLineDash([5, 4]);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          ctx.globalAlpha = 0.5;
+          ctx.moveTo(left, yPx);
+          ctx.lineTo(right, yPx);
+          ctx.stroke();
+          ctx.globalAlpha = 0.7;
+          ctx.setLineDash([]);
+          ctx.fillStyle = color;
+          ctx.font = "10px 'Share Tech Mono', monospace";
+          ctx.fillText(label, left + 4, yPx - 4);
+          ctx.restore();
+        };
+
+        if (yVal => y.getPixelForValue(THRESHOLD_SAFE) > 0) {
+          drawLine(THRESHOLD_SAFE,    '#00e676', `SAFE ↔ CAUTION  (${THRESHOLD_SAFE} ppm)`);
+          drawLine(THRESHOLD_CAUTION, '#ffab00', `CAUTION ↔ DANGER  (${THRESHOLD_CAUTION} ppm)`);
+        }
+      }
+    }]
+  });
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  UI UPDATES
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Determine status string and color variables from a TDS value           */
+function getStatus(tds) {
+  if (tds < THRESHOLD_SAFE)    return { label: 'SAFE',    color: 'var(--safe)',    dim: 'var(--safe-dim)'    };
+  if (tds < THRESHOLD_CAUTION) return { label: 'CAUTION', color: 'var(--caution)', dim: 'var(--caution-dim)' };
+  return                              { label: 'DANGER',  color: 'var(--danger)',  dim: 'var(--danger-dim)'  };
+}
+
+/* Flash animation helper — briefly dims the element then restores it     */
+function flashEl(el) {
+  el.classList.remove('flash');
+  void el.offsetWidth;           /* force reflow to re-trigger animation  */
+  el.classList.add('flash');
+}
+
+/* Main update function — called every time a new TDS reading arrives     */
+function onNewReading(tds) {
+  const now = new Date();
+
+  /* ── Session init ──────────────────────────────────────────────────── */
+  if (!sessionStart) {
+    sessionStart = now;
+    document.getElementById('session-start').textContent = fmtTime(sessionStart);
+  }
+
+  sessionSamples.push(tds);
+
+  /* ── Rolling history ───────────────────────────────────────────────── */
+  const timeLabel = fmtTime(now);
+
+  tdsHistory.push({ t: timeLabel, v: tds });
+  if (tdsHistory.length > ROLLING_WINDOW) tdsHistory.shift();
+
+  /* ── Chart update ──────────────────────────────────────────────────── */
+  chart.data.labels  = tdsHistory.map(d => d.t);
+  chart.data.datasets[0].data = tdsHistory.map(d => d.v);
+
+  /* Extend y-axis top if value exceeds current max                       */
+  const currentMax = Math.max(...tdsHistory.map(d => d.v));
+  chart.options.scales.y.suggestedMax = Math.max(800, currentMax * 1.15);
+
+  chart.update('active');        /* smooth update, not full re-render     */
+
+  /* ── Graph stats ───────────────────────────────────────────────────── */
+  const vals = tdsHistory.map(d => d.v);
+  const avg  = vals.reduce((a, b) => a + b, 0) / vals.length;
+  document.getElementById('stat-min').textContent = Math.min(...vals).toFixed(0);
+  document.getElementById('stat-max').textContent = Math.max(...vals).toFixed(0);
+  document.getElementById('stat-avg').textContent = avg.toFixed(0);
+
+  /* ── Big TDS number ─────────────────────────────────────────────────── */
+  const tdsEl = document.getElementById('tds-value');
+  tdsEl.textContent = tds.toFixed(0);
+  flashEl(tdsEl);
+
+  /* ── Status display ─────────────────────────────────────────────────── */
+  const s = getStatus(tds);
+  const statusEl = document.getElementById('status-text');
+  statusEl.textContent = s.label;
+  statusEl.style.color = s.color;
+  tdsEl.style.color        = s.color;
+  tdsEl.style.textShadow   = `0 0 40px ${s.dim.replace('var(', '').replace(')', '')}`;
+
+  /* ── Threshold needle position ──────────────────────────────────────── */
+  /* Map 0–THRESHOLD_MAX to 0–100%, clamp at ends                         */
+  const pct = Math.min(100, Math.max(0, (tds / THRESHOLD_MAX) * 100));
+  document.getElementById('threshold-needle').style.left = pct + '%';
+
+  /* ── Session stats ──────────────────────────────────────────────────── */
+  document.getElementById('sample-count').textContent = sessionSamples.length;
+  const sAvg = sessionSamples.reduce((a, b) => a + b, 0) / sessionSamples.length;
+  document.getElementById('session-avg').textContent  = sAvg.toFixed(0) + ' ppm';
+  document.getElementById('last-updated').textContent = fmtTime(now);
+
+  /* ── Timestamps ─────────────────────────────────────────────────────── */
+  document.getElementById('tds-updated').textContent  = 'Updated at ' + fmtTime(now);
+  document.getElementById('footer-ts').textContent    =
+    'Last data point: ' + now.toLocaleString('en-GB');
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  POWER DISPLAY — static (values don't change at runtime)
+      Call once on load; update if you add dynamic current sensing later.
+   ───────────────────────────────────────────────────────────────────────── */
+function renderPower() {
+  const totalAmperes = TOTAL_CURRENT / 1000;
+  const watts = (VOLTAGE * totalAmperes).toFixed(2);
+
+  document.getElementById('power-current').textContent = TOTAL_CURRENT + ' mA';
+  document.getElementById('power-watts').textContent   = watts + ' W';
+
+  /* Mini bar widths — relative to TOTAL_CURRENT                          */
+  const pct = v => ((v / TOTAL_CURRENT) * 100).toFixed(1) + '%';
+  document.getElementById('pb-esp32').style.width = pct(CURRENT_ESP32);
+  document.getElementById('pb-oled' ).style.width = pct(CURRENT_OLED);
+  document.getElementById('pb-tds'  ).style.width = pct(CURRENT_TDS);
+  document.getElementById('pb-misc' ).style.width = pct(CURRENT_MISC);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  CONNECTION BADGE
+   ───────────────────────────────────────────────────────────────────────── */
+function setConnected(state) {
+  const badge = document.getElementById('conn-badge');
+  const text  = document.getElementById('conn-text');
+  badge.className = 'conn-badge ' + state;
+  if (state === 'connected') text.textContent = 'LIVE';
+  else if (state === 'error') text.textContent = 'ERROR';
+  else text.textContent = 'CONNECTING';
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  FIREBASE INTEGRATION
+   ───────────────────────────────────────────────────────────────────────── */
+function startFirebase() {
+  try {
+    const app = firebase.initializeApp(FIREBASE_CONFIG);
+    const db  = firebase.database(app);
+    const ref = db.ref(TDS_PATH);
+
+    /* Use onValue — fires immediately with current value and then on
+       every change. This is push-based and very efficient.                */
+    ref.on('value',
+      snapshot => {
+        const val = snapshot.val();
+        if (val === null || isNaN(Number(val))) return;
+
+        setConnected('connected');
+        document.getElementById('error-toast').style.display = 'none';
+        onNewReading(Number(val));
+      },
+      error => {
+        console.error('Firebase read error:', error);
+        setConnected('error');
+        document.getElementById('error-toast').style.display = 'block';
+
+        /* Hide toast after 4 s; Firebase SDK will auto-retry              */
+        setTimeout(() => {
+          document.getElementById('error-toast').style.display = 'none';
+        }, 4000);
+      }
+    );
+
+  } catch (e) {
+    /* Firebase init failed (likely placeholder config) — demo mode       */
+    console.warn('Firebase init failed, running in demo mode:', e.message);
+    useDemoMode = true;
+    startDemoMode();
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  DEMO MODE
+      Generates realistic-looking TDS readings so the dashboard looks live
+      even when Firebase is not configured.  Remove or disable in prod.
+   ───────────────────────────────────────────────────────────────────────── */
+function startDemoMode() {
+  setConnected('connected');
+  document.getElementById('conn-text').textContent = 'DEMO';
+
+  let base = 220;    /* starting TDS ppm                                  */
+  let drift = 0;
+
+  setInterval(() => {
+    /* Random walk with drift — keeps readings realistic                  */
+    drift += (Math.random() - 0.5) * 2;
+    drift  = Math.max(-40, Math.min(40, drift));
+    base  += drift * 0.3 + (Math.random() - 0.49) * 8;
+    base   = Math.max(30, Math.min(900, base));
+
+    onNewReading(parseFloat(base.toFixed(1)));
+  }, POLL_INTERVAL_MS);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ▶  INIT
+   ───────────────────────────────────────────────────────────────────────── */
+buildChart();
+renderPower();
+startFirebase();
+</script>
+
+</body>
+</html>
